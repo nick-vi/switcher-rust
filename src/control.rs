@@ -1,5 +1,6 @@
 use crate::device::{DeviceState, DeviceStatus};
 use crate::utils::current_timestamp_hex;
+use log::{debug, error, info, warn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
@@ -29,42 +30,80 @@ impl SwitcherController {
     }
 
     pub async fn turn_on(&self) -> Result<(), Box<dyn std::error::Error>> {
+        info!(
+            "Turning device ON - IP: {}, Device ID: {}",
+            self.ip_address, self.device_id
+        );
+
+        debug!("Sending turn ON command");
         self.send_control_command("1").await?;
 
         // Verify the command worked by checking status (with retry)
+        debug!(
+            "Waiting {}ms before verifying command",
+            COMMAND_VERIFY_DELAY_MS
+        );
         tokio::time::sleep(tokio::time::Duration::from_millis(COMMAND_VERIFY_DELAY_MS)).await;
         let mut status = self.get_status().await?;
 
         if status.state != DeviceState::On {
+            warn!(
+                "Device not ON after first attempt, retrying after {}ms",
+                COMMAND_RETRY_DELAY_MS
+            );
             // Device might need more time, try once more
             tokio::time::sleep(tokio::time::Duration::from_millis(COMMAND_RETRY_DELAY_MS)).await;
             status = self.get_status().await?;
 
             if status.state != DeviceState::On {
+                error!(
+                    "Device failed to turn ON after retry - current state: {:?}",
+                    status.state
+                );
                 return Err("Command sent but device did not turn ON (invalid device ID?)".into());
             }
         }
 
+        info!("Device successfully turned ON");
         Ok(())
     }
 
     pub async fn turn_off(&self) -> Result<(), Box<dyn std::error::Error>> {
+        info!(
+            "Turning device OFF - IP: {}, Device ID: {}",
+            self.ip_address, self.device_id
+        );
+
+        debug!("Sending turn OFF command");
         self.send_control_command("0").await?;
 
         // Verify the command worked by checking status (with retry)
+        debug!(
+            "Waiting {}ms before verifying command",
+            COMMAND_VERIFY_DELAY_MS
+        );
         tokio::time::sleep(tokio::time::Duration::from_millis(COMMAND_VERIFY_DELAY_MS)).await;
         let mut status = self.get_status().await?;
 
         if status.state != DeviceState::Off {
+            warn!(
+                "Device not OFF after first attempt, retrying after {}ms",
+                COMMAND_RETRY_DELAY_MS
+            );
             // Device might need more time, try once more
             tokio::time::sleep(tokio::time::Duration::from_millis(COMMAND_RETRY_DELAY_MS)).await;
             status = self.get_status().await?;
 
             if status.state != DeviceState::Off {
+                error!(
+                    "Device failed to turn OFF after retry - current state: {:?}",
+                    status.state
+                );
                 return Err("Command sent but device did not turn OFF (invalid device ID?)".into());
             }
         }
 
+        info!("Device successfully turned OFF");
         Ok(())
     }
 
@@ -96,23 +135,53 @@ impl SwitcherController {
     }
 
     pub async fn get_status(&self) -> Result<DeviceStatus, Box<dyn std::error::Error>> {
+        debug!(
+            "Getting device status - IP: {}, Device ID: {}",
+            self.ip_address, self.device_id
+        );
+
+        debug!("Connecting to device at {}:{}", self.ip_address, self.port);
         let mut stream = timeout(
             Duration::from_secs(CONNECT_TIMEOUT_SECS),
             TcpStream::connect(format!("{}:{}", self.ip_address, self.port)),
         )
-        .await??;
+        .await
+        .map_err(|e| {
+            error!(
+                "Connection timeout to {}:{}: {}",
+                self.ip_address, self.port, e
+            );
+            e
+        })?
+        .map_err(|e| {
+            error!(
+                "Failed to connect to {}:{}: {}",
+                self.ip_address, self.port, e
+            );
+            e
+        })?;
 
+        debug!("Successfully connected, performing login");
         let (timestamp, session_id) = self.login(&mut stream).await?;
+        debug!("Login successful, session_id: {}", session_id);
+
         let packet = self.build_get_state_packet(&session_id, &timestamp);
+        debug!("Built status request packet");
 
         let signed_packet = self.sign_packet(&packet);
+        debug!("Sending status request packet");
         stream.write_all(&hex::decode(signed_packet)?).await?;
 
         let mut response = [0; 1024];
         let len = stream.read(&mut response).await?;
+        debug!("Received {} bytes response", len);
 
         // Check if we got a valid response (should be > 100 bytes for real device)
         if len < 50 {
+            error!(
+                "Received short response ({} bytes), device may not exist or invalid device ID",
+                len
+            );
             return Err("Device did not respond or invalid device ID".into());
         }
 
@@ -139,14 +208,34 @@ impl SwitcherController {
     }
 
     async fn send_control_command(&self, command: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let mut stream = TcpStream::connect(format!("{}:{}", self.ip_address, self.port)).await?;
+        debug!(
+            "Sending control command '{}' to device at {}:{}",
+            command, self.ip_address, self.port
+        );
 
+        debug!("Connecting to device for control command");
+        let mut stream = TcpStream::connect(format!("{}:{}", self.ip_address, self.port))
+            .await
+            .map_err(|e| {
+                error!("Failed to connect to device for control command: {}", e);
+                e
+            })?;
+
+        debug!("Connected, performing login for control command");
         let (timestamp, session_id) = self.login(&mut stream).await?;
-        let packet = self.build_control_packet(&session_id, &timestamp, command);
-        let signed_packet = self.sign_packet(&packet);
+        debug!(
+            "Login successful for control command, session_id: {}",
+            session_id
+        );
 
+        let packet = self.build_control_packet(&session_id, &timestamp, command);
+        debug!("Built control packet for command '{}'", command);
+
+        let signed_packet = self.sign_packet(&packet);
+        debug!("Sending control command packet");
         stream.write_all(&hex::decode(signed_packet)?).await?;
 
+        debug!("Control command '{}' sent successfully", command);
         Ok(())
     }
 

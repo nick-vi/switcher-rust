@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use log::{debug, error, info};
 use std::io::Write;
 use tokio::time::Duration;
 
@@ -22,6 +23,12 @@ use utils::{current_timestamp, format_timestamp};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    #[arg(short, long, global = true, help = "Enable verbose logging")]
+    verbose: bool,
+
+    #[arg(long, global = true, help = "Enable debug logging")]
+    debug: bool,
 }
 
 #[derive(Subcommand)]
@@ -100,6 +107,15 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
+    // Initialize logging based on CLI flags
+    init_logging(cli.verbose, cli.debug);
+
+    info!("Starting switcher-rust CLI");
+    debug!(
+        "CLI arguments parsed: verbose={}, debug={}",
+        cli.verbose, cli.debug
+    );
+
     match cli.command {
         Commands::Discover {
             timeout,
@@ -107,19 +123,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cache_timeout,
             cache_only,
         } => {
+            info!("Starting device discovery - timeout: {}s, no_cache: {}, cache_timeout: {}s, cache_only: {}",
+                  timeout, no_cache, cache_timeout, cache_only);
+
             let discovery = if no_cache {
+                debug!("Creating discovery instance without cache");
                 SwitcherDiscovery::without_cache()
             } else {
+                debug!(
+                    "Creating discovery instance with cache settings - use_cache: {}, timeout: {}s",
+                    !no_cache, cache_timeout
+                );
                 SwitcherDiscovery::with_cache_settings(!no_cache, cache_timeout)
             };
 
             let devices = if cache_only {
-                println!("📦 Loading devices from cache only...");
+                info!("Attempting cache-only discovery");
                 discovery.discover_from_cache_only()?
             } else {
-                println!("🔍 Discovering Switcher devices for {} seconds...", timeout);
+                info!("Starting network discovery for {} seconds", timeout);
                 discovery.discover(Duration::from_secs(timeout)).await?
             };
+
+            info!("Discovery completed - found {} devices", devices.len());
 
             if devices.is_empty() {
                 println!(
@@ -179,48 +205,106 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ip,
             device_id,
             alias,
-        } => match resolve_device_info(ip, device_id, alias).await {
-            Ok((resolved_ip, resolved_device_id)) => {
-                let controller = SwitcherController::new(resolved_ip, resolved_device_id);
-                match controller.turn_on().await {
-                    Ok(_) => println!("✅ Device turned ON"),
-                    Err(e) => println!("❌ Failed to turn device on: {}", e),
+        } => {
+            info!(
+                "Turning device ON - ip: {:?}, device_id: {:?}, alias: {:?}",
+                ip, device_id, alias
+            );
+            match resolve_device_info(ip, device_id, alias).await {
+                Ok((resolved_ip, resolved_device_id)) => {
+                    debug!(
+                        "Resolved device info - ip: {}, device_id: {}",
+                        resolved_ip, resolved_device_id
+                    );
+                    let controller = SwitcherController::new(resolved_ip, resolved_device_id);
+                    match controller.turn_on().await {
+                        Ok(_) => {
+                            info!("Successfully turned device ON");
+                            println!("✅ Device turned ON");
+                        }
+                        Err(e) => {
+                            error!("Failed to turn device on: {}", e);
+                            println!("❌ Failed to turn device on: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to resolve device info: {}", e);
+                    println!("❌ {}", e);
                 }
             }
-            Err(e) => println!("❌ {}", e),
-        },
+        }
         Commands::Off {
             ip,
             device_id,
             alias,
-        } => match resolve_device_info(ip, device_id, alias).await {
-            Ok((resolved_ip, resolved_device_id)) => {
-                let controller = SwitcherController::new(resolved_ip, resolved_device_id);
-                match controller.turn_off().await {
-                    Ok(_) => println!("✅ Device turned OFF"),
-                    Err(e) => println!("❌ Failed to turn device off: {}", e),
+        } => {
+            info!(
+                "Turning device OFF - ip: {:?}, device_id: {:?}, alias: {:?}",
+                ip, device_id, alias
+            );
+            match resolve_device_info(ip, device_id, alias).await {
+                Ok((resolved_ip, resolved_device_id)) => {
+                    debug!(
+                        "Resolved device info - ip: {}, device_id: {}",
+                        resolved_ip, resolved_device_id
+                    );
+                    let controller = SwitcherController::new(resolved_ip, resolved_device_id);
+                    match controller.turn_off().await {
+                        Ok(_) => {
+                            info!("Successfully turned device OFF");
+                            println!("✅ Device turned OFF");
+                        }
+                        Err(e) => {
+                            error!("Failed to turn device off: {}", e);
+                            println!("❌ Failed to turn device off: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to resolve device info: {}", e);
+                    println!("❌ {}", e);
                 }
             }
-            Err(e) => println!("❌ {}", e),
-        },
+        }
         Commands::Status {
             ip,
             device_id,
             alias,
-        } => match resolve_device_info(ip, device_id, alias).await {
-            Ok((resolved_ip, resolved_device_id)) => {
-                let controller = SwitcherController::new(resolved_ip, resolved_device_id);
-                match controller.get_status().await {
-                    Ok(state) => {
-                        println!("📊 Device Status:");
-                        println!("  State: {:?}", state.state);
-                        println!("  Power: {}W", state.power_consumption);
+        } => {
+            info!(
+                "Getting device status - ip: {:?}, device_id: {:?}, alias: {:?}",
+                ip, device_id, alias
+            );
+            match resolve_device_info(ip, device_id, alias).await {
+                Ok((resolved_ip, resolved_device_id)) => {
+                    debug!(
+                        "Resolved device info - ip: {}, device_id: {}",
+                        resolved_ip, resolved_device_id
+                    );
+                    let controller = SwitcherController::new(resolved_ip, resolved_device_id);
+                    match controller.get_status().await {
+                        Ok(state) => {
+                            info!(
+                                "Successfully retrieved device status - state: {:?}, power: {}W",
+                                state.state, state.power_consumption
+                            );
+                            println!("📊 Device Status:");
+                            println!("  State: {:?}", state.state);
+                            println!("  Power: {}W", state.power_consumption);
+                        }
+                        Err(e) => {
+                            error!("Failed to get device status: {}", e);
+                            println!("❌ Failed to get status: {}", e);
+                        }
                     }
-                    Err(e) => println!("❌ Failed to get status: {}", e),
+                }
+                Err(e) => {
+                    error!("Failed to resolve device info: {}", e);
+                    println!("❌ {}", e);
                 }
             }
-            Err(e) => println!("❌ {}", e),
-        },
+        }
         Commands::ClearCache { force } => {
             let cache_manager = CacheManager::new()?;
 
@@ -252,6 +336,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Pair { device_id, alias } => {
+            info!(
+                "Pairing device - device_id: {}, alias: {}",
+                device_id, alias
+            );
             // First check if device exists in cache or discover it
             let cache_manager = CacheManager::new()?;
             let mut cache = cache_manager.load_cache()?;
@@ -259,7 +347,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Check if device exists in cache
             if !cache.devices.contains_key(&device_id) {
                 // Device not in cache, need to discover it
-                println!("🔍 Device not found in cache, discovering...");
+                info!(
+                    "Device {} not found in cache, starting discovery",
+                    device_id
+                );
                 let discovery = SwitcherDiscovery::new();
                 let devices = discovery.discover(Duration::from_secs(10)).await?;
 
@@ -283,13 +374,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match pairing.pair_device(device.clone(), alias.clone()) {
                 Ok(()) => {
                     pairing_manager.save_pairing(&pairing)?;
+                    info!(
+                        "Successfully paired device {} with alias '{}'",
+                        device_id, alias
+                    );
 
                     println!("✅ Device paired successfully!");
                     println!("   Device: {} ({})", device.name, device_id);
                     println!("   Alias: {}", alias);
                     println!("   IP: {}", device.ip_address);
                 }
-                Err(e) => println!("❌ {}", e),
+                Err(e) => {
+                    error!("Failed to pair device {}: {}", device_id, e);
+                    println!("❌ {}", e);
+                }
             }
         }
         Commands::Unpair { alias, force } => {
@@ -390,6 +488,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Initialize logging based on CLI flags and environment variables
+fn init_logging(verbose: bool, debug: bool) {
+    use std::path::PathBuf;
+    use tracing_appender::rolling::{RollingFileAppender, Rotation};
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    // Determine log level based on flags
+    let log_level = if debug {
+        "debug"
+    } else if verbose {
+        "info"
+    } else {
+        "warn"
+    };
+
+    // Create log directory next to executable
+    let exe_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
+    let log_dir = exe_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+
+    // Create file appender with daily rotation
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, log_dir, "switcher-rust.log");
+
+    // Create console layer
+    let console_layer = fmt::layer()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_file(false)
+        .with_line_number(false);
+
+    // Create file layer
+    let file_layer = fmt::layer()
+        .with_writer(file_appender)
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_file(true)
+        .with_line_number(true)
+        .with_ansi(false); // No ANSI colors in log files
+
+    // Create filter
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!(
+            "switcher_rust={},switcher-rust={}",
+            log_level, log_level
+        ))
+    });
+
+    // Initialize tracing subscriber with both console and file output
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
+        .with(file_layer)
+        .init();
+}
+
 /// Resolve device IP and ID from either direct parameters or paired device alias
 async fn resolve_device_info(
     ip: Option<String>,
@@ -422,8 +578,8 @@ async fn resolve_device_info(
         (None, None, None) => {
             Err("Must specify either --ip and --device-id, or --alias for a paired device.".into())
         }
-        _ => {
-            Err("Invalid parameter combination. Use either --ip and --device-id, or --alias.".into())
+        (None, Some(_), Some(_)) | (Some(_), None, Some(_)) => {
+            Err("Cannot mix IP/device-id with alias. Use either --ip and --device-id, or --alias.".into())
         }
     }
 }

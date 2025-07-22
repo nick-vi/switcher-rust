@@ -1,6 +1,7 @@
 use crate::cache::CacheManager;
 use crate::device::SwitcherDevice;
 use crate::pairing::PairingManager;
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::net::UdpSocket;
@@ -57,12 +58,7 @@ impl SwitcherDiscovery {
         let cache = cache_manager.load_cache()?;
         let devices = cache.get_fresh_devices(self.cache_max_age);
 
-        if !devices.is_empty() {
-            println!("📦 Found {} cached device(s):", devices.len());
-            for device in &devices {
-                println!("  • {} ({})", device.name, device.ip_address);
-            }
-        }
+        info!("Found {} cached device(s)", devices.len());
 
         Ok(devices)
     }
@@ -72,23 +68,28 @@ impl SwitcherDiscovery {
         &self,
         duration: Duration,
     ) -> Result<Vec<SwitcherDevice>, Box<dyn std::error::Error>> {
+        debug!(
+            "Starting discovery with cache - duration: {:?}, use_cache: {}, cache_max_age: {}",
+            duration, self.use_cache, self.cache_max_age
+        );
+
         let mut all_devices = Vec::new();
 
         if self.use_cache {
             if let Some(cache_manager) = &self.cache_manager {
+                debug!("Loading devices from cache");
                 match cache_manager.load_cache() {
                     Ok(cache) => {
                         let cached_devices = cache.get_fresh_devices(self.cache_max_age);
                         if !cached_devices.is_empty() {
-                            println!(
-                                "📦 Loaded {} fresh device(s) from cache",
-                                cached_devices.len()
-                            );
+                            info!("Loaded {} fresh device(s) from cache", cached_devices.len());
                             all_devices.extend(cached_devices);
+                        } else {
+                            debug!("No fresh devices found in cache");
                         }
                     }
                     Err(e) => {
-                        println!("⚠️  Could not load cache: {}", e);
+                        warn!("Could not load cache: {}", e);
                     }
                 }
             }
@@ -120,13 +121,13 @@ impl SwitcherDiscovery {
                         cache.remove_old_devices(self.cache_max_age * 2);
 
                         if let Err(e) = cache_manager.save_cache(&cache) {
-                            println!("⚠️  Could not save cache: {}", e);
+                            warn!("Could not save cache: {}", e);
                         } else {
-                            println!("💾 Updated device cache");
+                            debug!("Updated device cache");
                         }
                     }
                     Err(e) => {
-                        println!("⚠️  Could not update cache: {}", e);
+                        warn!("Could not update cache: {}", e);
                     }
                 }
             }
@@ -146,12 +147,14 @@ impl SwitcherDiscovery {
 
                     if updated {
                         if let Err(e) = pairing_manager.save_pairing(&pairing) {
-                            println!("⚠️  Could not update pairing data: {}", e);
+                            warn!("Could not update pairing data: {}", e);
+                        } else {
+                            debug!("Updated pairing data for discovered devices");
                         }
                     }
                 }
                 Err(e) => {
-                    println!("⚠️  Could not load pairing data: {}", e);
+                    warn!("Could not load pairing data: {}", e);
                 }
             }
         }
@@ -175,12 +178,24 @@ impl SwitcherDiscovery {
         &self,
         duration: Duration,
     ) -> Result<Vec<SwitcherDevice>, Box<dyn std::error::Error>> {
+        debug!("Starting network discovery - duration: {:?}", duration);
         let discovered_devices = Arc::new(Mutex::new(HashMap::new()));
 
         // Power Plug devices broadcast on port 10002 only
-        let socket = UdpSocket::bind("0.0.0.0:10002").await?;
+        debug!("Binding UDP socket to 0.0.0.0:10002");
+        let socket = match UdpSocket::bind("0.0.0.0:10002").await {
+            Ok(socket) => {
+                debug!("Successfully bound UDP socket");
+                socket
+            }
+            Err(e) => {
+                error!("Failed to bind UDP socket: {}", e);
+                return Err(e.into());
+            }
+        };
+
         socket.set_broadcast(true)?;
-        println!("🔍 Listening for Power Plug devices...");
+        info!("Listening for Power Plug devices on UDP port 10002");
 
         let devices_clone = Arc::clone(&discovered_devices);
         let handle = tokio::spawn(async move {
@@ -188,27 +203,47 @@ impl SwitcherDiscovery {
 
             loop {
                 match socket.recv_from(&mut buf).await {
-                    Ok((len, _addr)) => {
+                    Ok((len, addr)) => {
+                        debug!("Received {} bytes from {}", len, addr);
                         if let Some(device) = SwitcherDevice::from_discovery_packet(&buf[..len]) {
                             let mut devices = devices_clone.lock().unwrap();
                             if !devices.contains_key(&device.device_id) {
-                                println!(
-                                    "📱 Found Power Plug: {} at {}",
-                                    device.name, device.ip_address
+                                info!(
+                                    "Discovered new device: {} (ID: {}) at {}",
+                                    device.name, device.device_id, device.ip_address
                                 );
                                 devices.insert(device.device_id.clone(), device);
+                            } else {
+                                debug!("Device {} already discovered, skipping", device.device_id);
                             }
+                        } else {
+                            debug!(
+                                "Received packet from {} but could not parse as Switcher device",
+                                addr
+                            );
                         }
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        debug!("UDP receive error: {}", e);
+                        break;
+                    }
                 }
             }
         });
 
+        debug!(
+            "Waiting for {} seconds to collect device broadcasts",
+            duration.as_secs()
+        );
         sleep(duration).await;
         handle.abort();
 
         let devices = discovered_devices.lock().unwrap();
+        let device_count = devices.len();
+        info!(
+            "Network discovery completed - found {} devices",
+            device_count
+        );
         Ok(devices.values().cloned().collect())
     }
 }

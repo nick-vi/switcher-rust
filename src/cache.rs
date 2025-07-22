@@ -1,6 +1,7 @@
 use crate::config::ConfigManager;
 use crate::device::SwitcherDevice;
 use crate::utils::current_timestamp;
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -32,10 +33,15 @@ impl DeviceCache {
         let device_id = &device.device_id;
 
         if let Some(cached) = self.devices.get_mut(device_id) {
+            debug!("Updating cached device: {} ({})", device.name, device_id);
             cached.device = device;
             cached.last_seen = now;
             cached.discovery_count += 1;
         } else {
+            debug!(
+                "Adding new device to cache: {} ({})",
+                device.name, device_id
+            );
             self.devices.insert(
                 device.device_id.clone(),
                 CachedDevice {
@@ -52,18 +58,36 @@ impl DeviceCache {
         let now = current_timestamp();
         let cutoff = now.saturating_sub(max_age_seconds);
 
-        self.devices
+        let fresh_devices: Vec<SwitcherDevice> = self
+            .devices
             .values()
             .filter(|cached| cached.last_seen >= cutoff)
             .map(|cached| cached.device.clone())
-            .collect()
+            .collect();
+
+        debug!(
+            "Retrieved {} fresh devices from cache (max_age: {}s)",
+            fresh_devices.len(),
+            max_age_seconds
+        );
+        fresh_devices
     }
 
     pub fn remove_old_devices(&mut self, max_age_seconds: u64) {
         let now = current_timestamp();
         let cutoff = now.saturating_sub(max_age_seconds);
+        let initial_count = self.devices.len();
 
         self.devices.retain(|_, cached| cached.last_seen >= cutoff);
+        let removed_count = initial_count - self.devices.len();
+
+        if removed_count > 0 {
+            info!(
+                "Removed {} old devices from cache (older than {}s)",
+                removed_count, max_age_seconds
+            );
+        }
+
         self.last_updated = now;
     }
 }
@@ -79,14 +103,17 @@ impl CacheManager {
     }
 
     pub fn load_cache(&self) -> Result<DeviceCache, Box<dyn std::error::Error>> {
+        debug!("Loading device cache");
         self.config_manager.load_cache_data()
     }
 
     pub fn save_cache(&self, cache: &DeviceCache) -> Result<(), Box<dyn std::error::Error>> {
+        debug!("Saving device cache with {} devices", cache.devices.len());
         self.config_manager.save_cache_data(cache)
     }
 
     pub fn clear_cache(&self) -> Result<(), Box<dyn std::error::Error>> {
+        info!("Clearing device cache");
         self.config_manager.clear_config()
     }
 

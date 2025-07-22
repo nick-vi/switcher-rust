@@ -1,6 +1,7 @@
 use crate::config::ConfigManager;
 use crate::device::SwitcherDevice;
 use crate::utils::current_timestamp;
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -29,7 +30,13 @@ impl PairingConfig {
     }
 
     pub fn pair_device(&mut self, device: SwitcherDevice, alias: String) -> Result<(), String> {
+        debug!(
+            "Attempting to pair device {} with alias '{}'",
+            device.device_id, alias
+        );
+
         if self.aliases.contains_key(&alias) {
+            warn!("Pairing failed: alias '{}' is already in use", alias);
             return Err(format!("Alias '{}' is already in use", alias));
         }
 
@@ -37,6 +44,10 @@ impl PairingConfig {
 
         // Remove old pairing if device was already paired
         if let Some(old_paired) = self.devices.get(&device_id) {
+            info!(
+                "Removing old pairing for device {}: alias '{}'",
+                device_id, old_paired.alias
+            );
             self.aliases.remove(&old_paired.alias);
         }
 
@@ -48,23 +59,36 @@ impl PairingConfig {
         };
 
         self.devices.insert(device_id.clone(), paired_device);
-        self.aliases.insert(alias, device_id);
+        self.aliases.insert(alias.clone(), device_id.clone());
         self.last_updated = current_timestamp();
 
+        info!(
+            "Successfully paired device {} with alias '{}'",
+            device_id, alias
+        );
         Ok(())
     }
 
     pub fn unpair_device(&mut self, alias: &str) -> Result<(), String> {
+        debug!("Attempting to unpair device with alias '{}'", alias);
+
         let device_id = self
             .aliases
             .get(alias)
-            .ok_or_else(|| format!("No device found with alias '{}'", alias))?
+            .ok_or_else(|| {
+                warn!("Unpair failed: no device found with alias '{}'", alias);
+                format!("No device found with alias '{}'", alias)
+            })?
             .clone();
 
         self.devices.remove(&device_id);
         self.aliases.remove(alias);
         self.last_updated = current_timestamp();
 
+        info!(
+            "Successfully unpaired device {} (alias: '{}')",
+            device_id, alias
+        );
         Ok(())
     }
 
@@ -101,10 +125,15 @@ impl PairingManager {
     }
 
     pub fn load_pairing(&self) -> Result<PairingConfig, Box<dyn std::error::Error>> {
+        debug!("Loading pairing configuration");
         self.config_manager.load_pairing_data()
     }
 
     pub fn save_pairing(&self, pairing: &PairingConfig) -> Result<(), Box<dyn std::error::Error>> {
+        debug!(
+            "Saving pairing configuration with {} devices",
+            pairing.devices.len()
+        );
         self.config_manager.save_pairing_data(pairing)
     }
 }

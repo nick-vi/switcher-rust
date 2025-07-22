@@ -1,5 +1,6 @@
 use crate::cache::DeviceCache;
 use crate::pairing::PairingConfig;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,16 +58,30 @@ impl ConfigManager {
 
     /// Load the unified config, creating a new one if it doesn't exist
     pub fn load_unified_config(&self) -> Result<UnifiedConfig, Box<dyn std::error::Error>> {
+        debug!(
+            "Loading unified config from: {}",
+            self.config_file_path.display()
+        );
+
         if !self.config_file_path.exists() {
+            debug!("Config file does not exist, creating new config");
             return Ok(UnifiedConfig::new());
         }
 
         let content = fs::read_to_string(&self.config_file_path)?;
         let config: UnifiedConfig = serde_json::from_str(&content)?;
+        debug!(
+            "Successfully loaded config with version: {}",
+            config.version
+        );
 
         // Check version compatibility
         if config.version != env!("CARGO_PKG_VERSION") {
-            println!("⚠️  Config version mismatch, starting fresh");
+            warn!(
+                "Config version mismatch (found: {}, expected: {}), starting fresh",
+                config.version,
+                env!("CARGO_PKG_VERSION")
+            );
             return Ok(UnifiedConfig::new());
         }
 
@@ -78,6 +93,10 @@ impl ConfigManager {
         &self,
         config: &UnifiedConfig,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        debug!(
+            "Saving unified config to: {}",
+            self.config_file_path.display()
+        );
         let content = serde_json::to_string_pretty(config)?;
 
         // Create parent directory if it doesn't exist
@@ -86,6 +105,7 @@ impl ConfigManager {
         }
 
         fs::write(&self.config_file_path, content)?;
+        debug!("Successfully saved unified config");
         Ok(())
     }
 
