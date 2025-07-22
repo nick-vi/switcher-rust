@@ -4,10 +4,40 @@ A dead simple, minimal Rust CLI for Switcher Power Plug devices. No bloat, just 
 
 ## Features
 
-- 🔍 **Device Discovery**: UDP broadcast on the correct port (10002)
-- 🟢 **Device Control**: Direct TCP commands (on/off)
-- 📊 **Status Check**: Real-time device state and power consumption
-- 🎯 **Power Plug Only**: Focused on Type 01a8 devices
+### 🔍 Discovery & Detection
+
+- **Smart Discovery**: UDP broadcast on the correct port (10002) with intelligent caching
+- **Cache System**: Automatic device caching with configurable timeouts (default: 1 hour)
+- **Cache-Only Mode**: Skip network scanning and use cached devices only
+- **Auto-Cleanup**: Old devices automatically removed from cache
+
+### 🔗 Device Pairing & Management
+
+- **Device Pairing**: Pair devices with friendly aliases for easy management
+- **Alias Control**: Control devices by memorable names instead of IPs/IDs
+- **Persistent Storage**: Paired devices saved in unified configuration
+- **Device Renaming**: Update device names directly on the device
+- **Pairing Management**: List, add, and remove paired devices
+
+### 🎛️ Device Control
+
+- **Power Control**: Turn devices on/off via IP, device ID, or alias
+- **Real-time Status**: Check device state and power consumption
+- **Multiple Control Methods**: Support for IP address, device ID, or paired alias
+- **Instant Feedback**: Clear status indicators and error messages
+
+### 💾 Configuration & Storage
+
+- **Unified Config**: Single `switcher_config.json` file for all settings
+- **Version Safety**: Config cleared automatically when tool version changes
+- **Last Seen Tracking**: Track when paired devices were last discovered
+- **Auto-Migration**: Seamless config updates between versions
+
+### 🎯 Device Compatibility
+
+- **Power Plug Focus**: Optimized for Switcher Power Plug devices (Type 01a8)
+- **Protocol Compliance**: Proper Switcher protocol implementation
+- **Network Discovery**: Automatic device detection on local network
 
 ## Quick Start
 
