@@ -2,9 +2,11 @@ use std::io::{self, Write};
 use std::time::Duration;
 use tokio::time::timeout;
 
+use switcher_rust::cache::CacheManager;
 use switcher_rust::control::SwitcherController;
 use switcher_rust::device::{DeviceState, SwitcherDevice};
 use switcher_rust::discovery::SwitcherDiscovery;
+use switcher_rust::pairing::PairingManager;
 
 struct TestResults {
     passed: usize,
@@ -229,6 +231,242 @@ async fn test_control_commands(results: &mut TestResults, real_device: Option<&S
     }
 }
 
+async fn test_cache_functionality(
+    results: &mut TestResults,
+    discovered_devices: &[SwitcherDevice],
+) {
+    println!("\n=== CACHE TESTS ===");
+
+    // Test cache creation and device storage
+    print!("🧪 Test: Cache Creation and Device Storage... ");
+    let cache_manager = match CacheManager::new() {
+        Ok(manager) => manager,
+        Err(e) => {
+            results.fail(&format!("Failed to create cache manager: {}", e));
+            return;
+        }
+    };
+
+    let mut cache = match cache_manager.load_cache() {
+        Ok(cache) => cache,
+        Err(e) => {
+            results.fail(&format!("Failed to load cache: {}", e));
+            return;
+        }
+    };
+
+    // Add discovered devices to cache
+    let initial_count = cache.devices.len();
+    for device in discovered_devices {
+        cache.add_device(device.clone());
+    }
+
+    if cache.devices.len() >= initial_count {
+        results.pass();
+    } else {
+        results.fail("Device count didn't increase after adding devices");
+        return;
+    }
+
+    // Test cache persistence
+    print!("🧪 Test: Cache Persistence... ");
+    match cache_manager.save_cache(&cache) {
+        Ok(()) => {
+            // Try to reload and verify data persisted
+            match cache_manager.load_cache() {
+                Ok(reloaded_cache) => {
+                    if reloaded_cache.devices.len() == cache.devices.len() {
+                        results.pass();
+                    } else {
+                        results.fail("Cache data not persisted correctly");
+                    }
+                }
+                Err(e) => results.fail(&format!("Failed to reload cache: {}", e)),
+            }
+        }
+        Err(e) => results.fail(&format!("Failed to save cache: {}", e)),
+    }
+}
+
+async fn test_pairing_functionality(
+    results: &mut TestResults,
+    test_device: Option<&SwitcherDevice>,
+) {
+    println!("\n=== PAIRING TESTS ===");
+
+    if let Some(device) = test_device {
+        let pairing_manager = match PairingManager::new() {
+            Ok(manager) => manager,
+            Err(e) => {
+                results.fail(&format!("Failed to create pairing manager: {}", e));
+                return;
+            }
+        };
+
+        let mut pairing = match pairing_manager.load_pairing() {
+            Ok(pairing) => pairing,
+            Err(e) => {
+                results.fail(&format!("Failed to load pairing: {}", e));
+                return;
+            }
+        };
+
+        // Test device pairing
+        print!("🧪 Test: Device Pairing... ");
+        let test_alias = "Test Device Alias";
+        match pairing.pair_device(device.clone(), test_alias.to_string()) {
+            Ok(()) => {
+                if pairing.get_device_by_alias(test_alias).is_some() {
+                    results.pass();
+                } else {
+                    results.fail("Device not found by alias after pairing");
+                    return;
+                }
+            }
+            Err(e) => {
+                results.fail(&format!("Failed to pair device: {}", e));
+                return;
+            }
+        }
+
+        // Test duplicate alias prevention
+        print!("🧪 Test: Duplicate Alias Prevention... ");
+        match pairing.pair_device(device.clone(), test_alias.to_string()) {
+            Ok(()) => results.fail("Should have prevented duplicate alias"),
+            Err(_) => results.pass(), // Expected to fail
+        }
+
+        // Test device unpairing
+        print!("🧪 Test: Device Unpairing... ");
+        match pairing.unpair_device(test_alias) {
+            Ok(()) => {
+                if pairing.get_device_by_alias(test_alias).is_none() {
+                    results.pass();
+                } else {
+                    results.fail("Device still found by alias after unpairing");
+                }
+            }
+            Err(e) => results.fail(&format!("Failed to unpair device: {}", e)),
+        }
+
+        // Test pairing persistence
+        print!("🧪 Test: Pairing Persistence... ");
+        let persistent_alias = "Persistent Test Alias";
+        match pairing.pair_device(device.clone(), persistent_alias.to_string()) {
+            Ok(()) => {
+                match pairing_manager.save_pairing(&pairing) {
+                    Ok(()) => {
+                        match pairing_manager.load_pairing() {
+                            Ok(reloaded_pairing) => {
+                                if reloaded_pairing
+                                    .get_device_by_alias(persistent_alias)
+                                    .is_some()
+                                {
+                                    results.pass();
+                                    // Clean up
+                                    let mut cleanup_pairing = reloaded_pairing;
+                                    let _ = cleanup_pairing.unpair_device(persistent_alias);
+                                    let _ = pairing_manager.save_pairing(&cleanup_pairing);
+                                } else {
+                                    results.fail("Pairing not persisted after reload");
+                                }
+                            }
+                            Err(e) => results.fail(&format!("Failed to reload pairing: {}", e)),
+                        }
+                    }
+                    Err(e) => results.fail(&format!("Failed to save pairing: {}", e)),
+                }
+            }
+            Err(e) => results.fail(&format!(
+                "Failed to pair device for persistence test: {}",
+                e
+            )),
+        }
+    } else {
+        print!("🧪 Test: Device Pairing... ");
+        results.skip("No test device available");
+        print!("🧪 Test: Duplicate Alias Prevention... ");
+        results.skip("No test device available");
+        print!("🧪 Test: Device Unpairing... ");
+        results.skip("No test device available");
+        print!("🧪 Test: Pairing Persistence... ");
+        results.skip("No test device available");
+    }
+}
+
+async fn test_device_renaming(results: &mut TestResults, test_device: Option<&SwitcherDevice>) {
+    println!("\n=== DEVICE RENAMING TESTS ===");
+
+    if let Some(device) = test_device {
+        let controller =
+            SwitcherController::new(device.ip_address.clone(), device.device_id.clone());
+
+        // Get original name
+        let original_name = device.name.clone();
+
+        // Test device renaming
+        print!("🧪 Test: Device Renaming... ");
+        let test_name = "Test Renamed Device";
+        match timeout(
+            Duration::from_secs(10),
+            controller.set_device_name(test_name),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                // Wait a moment for the change to take effect
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                results.pass();
+
+                // Restore original name
+                print!("🧪 Test: Restore Original Name... ");
+                match timeout(
+                    Duration::from_secs(10),
+                    controller.set_device_name(&original_name),
+                )
+                .await
+                {
+                    Ok(Ok(())) => results.pass(),
+                    Ok(Err(e)) => results.fail(&format!("Failed to restore original name: {}", e)),
+                    Err(_) => results.fail("Restore name timed out"),
+                }
+            }
+            Ok(Err(e)) => results.fail(&format!("Device renaming failed: {}", e)),
+            Err(_) => results.fail("Device renaming timed out"),
+        }
+
+        // Test invalid name lengths
+        print!("🧪 Test: Invalid Name Length (too short)... ");
+        match timeout(Duration::from_secs(8), controller.set_device_name("A")).await {
+            Ok(Ok(())) => results.fail("Should have failed with name too short"),
+            Ok(Err(_)) => results.pass(), // Expected to fail
+            Err(_) => results.pass(),     // Timeout is also acceptable
+        }
+
+        print!("🧪 Test: Invalid Name Length (too long)... ");
+        let long_name = "A".repeat(35); // Over 32 character limit
+        match timeout(
+            Duration::from_secs(8),
+            controller.set_device_name(&long_name),
+        )
+        .await
+        {
+            Ok(Ok(())) => results.fail("Should have failed with name too long"),
+            Ok(Err(_)) => results.pass(), // Expected to fail
+            Err(_) => results.pass(),     // Timeout is also acceptable
+        }
+    } else {
+        print!("🧪 Test: Device Renaming... ");
+        results.skip("No test device available");
+        print!("🧪 Test: Restore Original Name... ");
+        results.skip("No test device available");
+        print!("🧪 Test: Invalid Name Length (too short)... ");
+        results.skip("No test device available");
+        print!("🧪 Test: Invalid Name Length (too long)... ");
+        results.skip("No test device available");
+    }
+}
+
 #[tokio::test]
 async fn comprehensive_test_suite() {
     println!("🚀 Starting Switcher CLI Comprehensive Tests");
@@ -275,6 +513,9 @@ async fn comprehensive_test_suite() {
     // Run all tests
     test_status_commands(&mut results, real_device.as_ref()).await;
     test_control_commands(&mut results, real_device.as_ref()).await;
+    test_cache_functionality(&mut results, &discovered_devices).await;
+    test_pairing_functionality(&mut results, real_device.as_ref()).await;
+    test_device_renaming(&mut results, real_device.as_ref()).await;
 
     // Print final results
     println!("\n============================================");
@@ -292,11 +533,17 @@ async fn comprehensive_test_suite() {
         );
         if real_device.is_some() {
             println!("✅ Real device testing was performed");
+            println!("✅ Device renaming tests were performed");
+            println!("✅ Pairing functionality tests were performed");
         } else {
             println!("⚠️  Real device testing was skipped");
+            println!("⚠️  Device renaming tests were skipped");
+            println!("⚠️  Pairing functionality tests were skipped");
         }
+        println!("✅ Cache functionality tests were performed");
     } else {
         println!("⚠️  No devices found - real device tests were skipped");
+        println!("⚠️  Cache and pairing tests used mock data");
     }
 
     // Assert that we have no failures

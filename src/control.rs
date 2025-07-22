@@ -1,5 +1,5 @@
 use crate::device::{DeviceState, DeviceStatus};
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::current_timestamp_hex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Duration};
@@ -64,6 +64,33 @@ impl SwitcherController {
                 return Err("Command sent but device did not turn OFF (invalid device ID?)".into());
             }
         }
+
+        Ok(())
+    }
+
+    pub async fn set_device_name(&self, new_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut stream = timeout(
+            Duration::from_secs(CONNECT_TIMEOUT_SECS),
+            TcpStream::connect(format!("{}:{}", self.ip_address, self.port)),
+        )
+        .await??;
+
+        let (timestamp, session_id) = self.login(&mut stream).await?;
+        let packet = self.build_set_name_packet(&session_id, &timestamp, new_name)?;
+
+        let signed_packet = self.sign_packet(&packet);
+        stream.write_all(&hex::decode(signed_packet)?).await?;
+
+        // Read response to confirm command was received
+        let mut response = [0; 1024];
+        let len = stream.read(&mut response).await?;
+
+        if len < 20 {
+            return Err("Device did not respond to name change command".into());
+        }
+
+        // Wait a moment for the device to process the name change
+        tokio::time::sleep(tokio::time::Duration::from_millis(COMMAND_VERIFY_DELAY_MS)).await;
 
         Ok(())
     }
@@ -150,11 +177,7 @@ impl SwitcherController {
     }
 
     fn get_timestamp(&self) -> String {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        format!("{:08x}", now)
+        current_timestamp_hex()
     }
 
     fn build_login_packet(&self, timestamp: &str) -> String {
@@ -182,6 +205,49 @@ impl SwitcherController {
             "fef0300002320103{}340001000000000000000000{}00000000000000000000f0fe{}00",
             session_id, timestamp, &self.device_id
         )
+    }
+
+    fn build_set_name_packet(
+        &self,
+        session_id: &str,
+        timestamp: &str,
+        new_name: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        // Convert name to hex and pad to 32 bytes (following aioswitcher implementation)
+        let name_hex = self.string_to_hexadecimal_device_name(new_name)?;
+
+        // Build packet following aioswitcher UPDATE_DEVICE_NAME_PACKET format
+        Ok(format!(
+            "fef0740002320202{}340001000000000000000000{}00000000000000000000f0fe{}{}00{}",
+            session_id,
+            timestamp,
+            &self.device_id,
+            "0".repeat(72), // PAD_72_ZEROS
+            name_hex
+        ))
+    }
+
+    fn string_to_hexadecimal_device_name(
+        &self,
+        name: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let length = name.len();
+        if length < 2 || length > 32 {
+            return Err(format!(
+                "Device name length must be between 2 and 32 characters, got {}",
+                length
+            )
+            .into());
+        }
+
+        let name_bytes = name.as_bytes();
+        let mut hex_name = hex::encode(name_bytes);
+
+        // Pad with zeros to 64 hex characters (32 bytes)
+        let zeros_needed = 64 - hex_name.len();
+        hex_name.push_str(&"00".repeat(zeros_needed / 2));
+
+        Ok(hex_name)
     }
 
     fn sign_packet(&self, hex_packet: &str) -> String {
